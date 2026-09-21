@@ -239,11 +239,34 @@ function lignesJson(txt) {
   return out;
 }
 
-/** Résumé lisible d'un évènement du transcript. */
+/** Première ligne utile d'une sortie d'outil, aplatie. */
+function extraitSortie(contenu) {
+  const brut =
+    typeof contenu === 'string'
+      ? contenu
+      : Array.isArray(contenu)
+        ? contenu.map((p) => p.text ?? '').join('\n')
+        : '';
+  for (const ligne of brut.split('\n')) {
+    const t = ligne.trim();
+    if (t) return t;
+  }
+  return '';
+}
+
+/**
+ * Résumé lisible d'un évènement du transcript.
+ *
+ * `kind` sert au filtrage : les blocs `thinking` sont conservés en base mais
+ * leur champ `thinking` est TOUJOURS vide — Claude Code n'en persiste que la
+ * signature. Une ligne « réflexion » n'apprend donc rien, sauf quand c'est
+ * l'évènement le plus récent : elle dit alors que l'agent réfléchit là,
+ * maintenant. On ne garde que celle-là.
+ */
 function evenement(e) {
   const c = e?.message?.content;
   if (typeof c === 'string') {
-    return { icone: '›', texte: c.replace(/\s+/g, ' ').trim() };
+    return { kind: 'texte', icone: '›', texte: c.replace(/\s+/g, ' ').trim() };
   }
   if (!Array.isArray(c)) return null;
   for (const part of c) {
@@ -252,17 +275,24 @@ function evenement(e) {
       const detail =
         a.command ?? a.file_path ?? a.pattern ?? a.query ?? a.description ?? '';
       return {
+        kind: 'outil',
         icone: '⚙',
         texte: `${part.name}${detail ? ' · ' + String(detail).replace(/\s+/g, ' ') : ''}`,
       };
     }
     if (part.type === 'text' && part.text?.trim()) {
-      return { icone: '›', texte: part.text.replace(/\s+/g, ' ').trim() };
+      return { kind: 'texte', icone: '›', texte: part.text.replace(/\s+/g, ' ').trim() };
     }
-    if (part.type === 'thinking') return { icone: '·', texte: 'réflexion' };
+    if (part.type === 'thinking') {
+      return { kind: 'pensee', icone: '·', texte: 'réflexion en cours…' };
+    }
     if (part.type === 'tool_result') {
-      const ok = part.is_error ? 'échec' : 'résultat';
-      return { icone: '↳', texte: ok };
+      const sortie = extraitSortie(part.content);
+      return {
+        kind: 'sortie',
+        icone: part.is_error ? '✗' : '↳',
+        texte: sortie || (part.is_error ? 'échec' : 'sans sortie'),
+      };
     }
   }
   return null;
@@ -305,22 +335,29 @@ function charger() {
     const actif = maintenant - mtime < SEUIL_ACTIF_MS;
 
     const activite = [];
-    for (let i = derniers.length - 1; i >= 0 && activite.length < 40; i--) {
+    for (let i = derniers.length - 1; i >= 0 && activite.length < 60; i--) {
       const ev = evenement(derniers[i]);
-      if (ev) activite.push({ ...ev, ts: Date.parse(derniers[i].timestamp ?? '') || 0 });
+      if (!ev) continue;
+      // Les réflexions ne portent aucun texte : on ne garde que la plus
+      // récente, qui signale « l'agent pense en ce moment ».
+      if (ev.kind === 'pensee' && activite.length > 0) continue;
+      activite.push({ ...ev, ts: Date.parse(derniers[i].timestamp ?? '') || 0 });
     }
 
     agents.push({
       // Le titre de l'outil quand on l'a, le prompt en repli.
       mission: titre || mission,
-      id, projet, actif, mtime,
+      id, projet, actif, mtime, debut,
       duree: fin - debut,
       etapes: derniers.length,
       activite,
     });
   }
-  // Actifs d'abord, puis les plus récents.
-  agents.sort((a, b) => (b.actif - a.actif) || (b.mtime - a.mtime));
+  // Actifs en haut, puis tri par date de LANCEMENT décroissante — pas par
+  // dernière activité : l'ordre de la liste doit rester stable pendant qu'on
+  // la regarde, or la dernière activité change à chaque seconde et ferait
+  // sauter les lignes sous le curseur.
+  agents.sort((a, b) => (b.actif - a.actif) || (b.debut - a.debut));
   return agents;
 }
 

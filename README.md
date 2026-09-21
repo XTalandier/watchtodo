@@ -198,10 +198,11 @@ AGENTS · 1 actif · 11 au total
  ✔ ae20a3b56  15m45  Front signature média à la demande
 ──────────────────────────────────────────────────────────────────
 93 étapes · -Users-xavier-projects-kidyscope
-· réflexion
-⚙ Bash · npm test
-↳ résultat
-⚙ Edit · apps/api/src/auth/auth.service.spec.ts
+· réflexion en cours…
+⚙ Bash · npx jest src/auth/auth.service.spec.ts
+↳ Test Suites: 1 passed, 1 total
+⚙ Bash · npm run lint:patterns
+↳ LINT OK
 
 ↑↓ choisir · clic · PgUp/PgDn détail · r recharger · q quitter
 ```
@@ -242,6 +243,17 @@ octets ajoutés depuis le dernier passage.
 
 **Actif ou terminé** se déduit de la fraîcheur du fichier : un agent au travail
 écrit à chaque étape. C'est une heuristique, pas un statut officiel.
+
+**Le raisonnement n'est pas affichable.** Les blocs `thinking` sont bien dans le
+transcript, mais leur champ texte est systématiquement vide — Claude Code n'en
+persiste que la signature. Une ligne « réflexion » n'apprend donc rien, et n'est
+gardée que lorsqu'elle est l'évènement le plus récent : elle signale alors que
+l'agent pense en ce moment. Ce qu'on affiche à la place, ce sont les appels
+d'outils **et leur sortie**, qui eux sont complets.
+
+**L'ordre de la liste est stable.** Les actifs en haut, puis tri par date de
+lancement décroissante — pas par dernière activité, qui change à chaque seconde
+et ferait sauter les lignes sous le curseur.
 
 ---
 
