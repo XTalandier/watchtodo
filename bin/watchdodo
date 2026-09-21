@@ -1,0 +1,441 @@
+#!/usr/bin/env node
+'use strict';
+/**
+ * watchdodo — visionneuse TODO.md interactive, dans le terminal.
+ *
+ *   watchdodo                 le TODO.md du repo courant (racine git)
+ *   watchdodo fichier.md      un fichier précis
+ *   watchdodo -a              affiche aussi les items faits
+ *   watchdodo --once          imprime tout et sort (pipeable, pas de TUI)
+ *   watchdodo --init          crée un TODO.md d'exemple
+ *
+ * Lecture seule : l'outil n'écrit JAMAIS dans le fichier. Il recharge
+ * intégralement dès que le fichier change sur disque.
+ *
+ * Zéro dépendance npm. On pilote le terminal directement (séquences SGR
+ * 1006 pour la souris) plutôt que de passer par ncurses, dont la version
+ * système macOS est figée en 2015 et n'a ni molette ni SGR.
+ *
+ * ── FORMAT ──────────────────────────────────────────────────────────────
+ *   # Titre du fichier
+ *
+ *   ## 🔴 Catégorie
+ *
+ *   - [ ] **ID-1** Libellé court `@tag` `!haute`
+ *     Une ligne de description. Deux au maximum.
+ *
+ * Cases : [ ] à faire · [~] en cours · [x] fait
+ * Méta  : `@tag` et `!priorité` — toujours entre backticks, dans le libellé.
+ *         Priorités connues : !haute !moyenne !basse
+ * Tout le reste du markdown (prose, listes, tableaux) est ignoré par
+ * l'outil mais conservé dans le fichier : ça reste un document lisible.
+ */
+
+const fs = require('fs');
+const path = require('path');
+const { execFileSync } = require('child_process');
+
+// ── Couleurs ────────────────────────────────────────────────────────────
+const E = '\x1b[';
+const C = {
+  rst: E + '0m', bold: E + '1m', dim: E + '2m', rev: E + '7m',
+  red: E + '31m', grn: E + '32m', ylw: E + '33m', blu: E + '34m',
+  mag: E + '35m', cyn: E + '36m', gry: E + '90m',
+  bgSel: E + '48;5;238m',
+};
+
+const MARK = {
+  todo: { glyph: '○', color: C.cyn },
+  wip:  { glyph: '◐', color: C.ylw },
+  done: { glyph: '✔', color: C.grn },
+};
+const PRIO = { haute: C.red, moyenne: C.ylw, basse: C.gry };
+
+// ── Largeur d'affichage (emoji = 2 colonnes) ────────────────────────────
+function charWidth(cp) {
+  if (cp === 0x200d) return 0;                       // zero-width joiner
+  if (cp >= 0xfe00 && cp <= 0xfe0f) return 0;        // sélecteurs de variante
+  if (cp < 0x1100) return 1;
+  if (
+    (cp >= 0x1100 && cp <= 0x115f) || (cp >= 0x2e80 && cp <= 0xa4cf) ||
+    (cp >= 0xac00 && cp <= 0xd7a3) || (cp >= 0xf900 && cp <= 0xfaff) ||
+    (cp >= 0xfe30 && cp <= 0xfe6f) || (cp >= 0xff00 && cp <= 0xff60) ||
+    (cp >= 0xffe0 && cp <= 0xffe6) || (cp >= 0x1f300 && cp <= 0x1f64f) ||
+    (cp >= 0x1f680 && cp <= 0x1f6ff) || (cp >= 0x1f900 && cp <= 0x1f9ff) ||
+    (cp >= 0x20000 && cp <= 0x3fffd)
+  ) return 2;
+  return 1;
+}
+const dw = (s) => [...s].reduce((n, ch) => n + charWidth(ch.codePointAt(0)), 0);
+
+function trunc(s, max) {
+  if (dw(s) <= max) return s;
+  let out = '', n = 0;
+  for (const ch of s) {
+    const w = charWidth(ch.codePointAt(0));
+    if (n + w > max - 1) break;
+    out += ch; n += w;
+  }
+  return out + '…';
+}
+
+// ── Parsing ─────────────────────────────────────────────────────────────
+const ITEM_RE = /^\s*[-*]\s+\[([ xX~])\]\s+(.*)$/;
+
+function parseItem(markChar, rest) {
+  let id = null;
+  const m = rest.match(/^\*\*(.+?)\*\*\s*/);
+  if (m) { id = m[1].trim(); rest = rest.slice(m[0].length); }
+
+  // Méta uniquement si entièrement entre backticks : évite d'avaler un
+  // `@nestjs/throttler` ou un `!important` qui appartient au libellé.
+  const tags = [];
+  let prio = null;
+  rest = rest.replace(/`@([A-Za-z0-9_-]+)`/g, (_, t) => { tags.push(t); return ''; });
+  rest = rest.replace(/`!([A-Za-z0-9_-]+)`/g, (_, p) => { if (!prio) prio = p; return ''; });
+
+  const mark = markChar === ' ' ? 'todo' : (markChar === '~' ? 'wip' : 'done');
+  return { mark, id, label: rest.replace(/\s+/g, ' ').trim(), tags, prio, desc: [] };
+}
+
+function parse(text) {
+  const lines = text.split(/\r?\n/);
+  let title = null, cur = null, item = null;
+  const sections = [];
+
+  for (const raw of lines) {
+    if (title === null && /^#\s+\S/.test(raw)) {
+      title = raw.replace(/^#\s+/, '').trim(); item = null; continue;
+    }
+    if (/^##\s+\S/.test(raw)) {
+      cur = { title: raw.replace(/^##\s+/, '').trim(), items: [] };
+      sections.push(cur); item = null; continue;
+    }
+    const m = raw.match(ITEM_RE);
+    if (m) {
+      if (!cur) { cur = { title: 'Sans catégorie', items: [] }; sections.push(cur); }
+      item = parseItem(m[1], m[2]);
+      cur.items.push(item);
+      continue;
+    }
+    if (item && /^\s{2,}\S/.test(raw)) { item.desc.push(raw.trim()); continue; }
+    if (/^\s*$/.test(raw)) continue;   // une ligne vide ne ferme pas l'item
+    item = null;                        // toute autre prose, si
+  }
+  return { title, sections };
+}
+
+// ── Résolution du fichier ───────────────────────────────────────────────
+function gitRoot() {
+  try {
+    return execFileSync('git', ['rev-parse', '--show-toplevel'],
+      { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim();
+  } catch { return null; }
+}
+
+const TEMPLATE = `# TODO
+
+Cases : \`[ ]\` à faire · \`[~]\` en cours · \`[x]\` fait
+Méta : \`@tag\` et \`!haute\` / \`!moyenne\` / \`!basse\`
+Affichage : \`watchdodo\`
+
+## 🔴 Prioritaire
+
+- [ ] **A-1** Premier item \`!haute\`
+  Une ligne de description, deux au maximum.
+
+## 🟡 Plus tard
+
+- [ ] **B-1** Un autre item \`@perso\`
+`;
+
+// ── CLI ─────────────────────────────────────────────────────────────────
+const argv = process.argv.slice(2);
+let showDone = false, once = false, init = false, file = null;
+for (const a of argv) {
+  if (a === '-a' || a === '--all') showDone = true;
+  else if (a === '-1' || a === '--once') once = true;
+  else if (a === '--init') init = true;
+  else if (a === '-h' || a === '--help') {
+    // Le bloc de doc en tête de fichier EST l'aide : une seule source.
+    const doc = fs.readFileSync(__filename, 'utf8').split('\n');
+    const start = doc.indexOf('/**') + 1;
+    const end = doc.indexOf(' */');
+    console.log(doc.slice(start, end).map((l) => l.replace(/^ \* ?/, '').replace(/^ \*$/, '')).join('\n'));
+    process.exit(0);
+  } else if (a.startsWith('-')) { console.error(`Option inconnue : ${a}`); process.exit(2); }
+  else file = a;
+}
+
+if (!file) file = path.join(gitRoot() || process.cwd(), 'TODO.md');
+file = path.resolve(file);
+
+if (init && !fs.existsSync(file)) {
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.writeFileSync(file, TEMPLATE);
+  console.log('Créé : ' + file);
+  process.exit(0);
+}
+if (!fs.existsSync(file)) {
+  console.error(`Pas de TODO ici.\n  attendu : ${file}\n  créer   : watchdodo --init`);
+  process.exit(1);
+}
+
+const home = process.env.HOME || '';
+const shortPath = home && file.startsWith(home) ? '~' + file.slice(home.length) : file;
+
+// ── État ────────────────────────────────────────────────────────────────
+let doc = parse(fs.readFileSync(file, 'utf8'));
+let rows = [];          // lignes affichables
+let items = [];         // index des lignes de type 'item'
+let sel = 0;            // index dans `items`
+let off = 0;            // offset de scroll
+const expanded = new Set();   // clés d'items dépliés, survivent au reload
+
+const keyOf = (it) => it.id || it.label;
+
+function buildRows() {
+  rows = []; items = [];
+  for (const sec of doc.sections) {
+    const vis = sec.items.filter((i) => showDone || i.mark !== 'done');
+    if (!vis.length) continue;
+    const done = sec.items.filter((i) => i.mark === 'done').length;
+    rows.push({ type: 'sec', sec, done, total: sec.items.length });
+    for (const it of vis) {
+      items.push(rows.length);
+      rows.push({ type: 'item', it });
+      if (expanded.has(keyOf(it))) {
+        for (const d of it.desc) rows.push({ type: 'desc', text: d });
+      }
+    }
+    rows.push({ type: 'blank' });
+  }
+  if (sel >= items.length) sel = Math.max(0, items.length - 1);
+}
+
+function reload() {
+  const prevKey = items.length ? rows[items[sel]].it && keyOf(rows[items[sel]].it) : null;
+  try { doc = parse(fs.readFileSync(file, 'utf8')); } catch { return; }
+  buildRows();
+  if (prevKey) {
+    const i = items.findIndex((r) => keyOf(rows[r].it) === prevKey);
+    if (i >= 0) sel = i;
+  }
+}
+
+// ── Rendu ───────────────────────────────────────────────────────────────
+function renderItem(it, width, selected) {
+  const m = MARK[it.mark];
+  const chev = it.desc.length ? (expanded.has(keyOf(it)) ? '▾' : '▸') : ' ';
+  const id = it.id ? it.id + ' ' : '';
+  const dimAll = it.mark === 'done' ? C.dim : '';
+
+  // Largeurs calculées sur le texte nu, jamais sur la chaîne colorée.
+  const metaPlain = (it.prio ? ' !' + it.prio : '') + it.tags.map((t) => ' @' + t).join('');
+  const prefixPlain = ` ${chev} ${m.glyph} ${id}`;
+  const label = trunc(it.label, Math.max(8, width - dw(prefixPlain) - dw(metaPlain)));
+
+  let meta = '';
+  if (it.prio) meta += ' ' + (PRIO[it.prio] || C.mag) + '!' + it.prio + C.rst + dimAll;
+  for (const t of it.tags) meta += ' ' + C.gry + '@' + t + C.rst + dimAll;
+
+  let body = dimAll + C.gry + ` ${chev} ` + C.rst + dimAll + m.color + m.glyph + C.rst + dimAll +
+             ' ' + (id ? C.bold + id + C.rst + dimAll : '') + label + meta + C.rst;
+
+  const pad = ' '.repeat(Math.max(0, width - dw(prefixPlain) - dw(label) - dw(metaPlain)));
+  if (!selected) return body + pad;
+  // Chaque reset interne rétablirait le fond par défaut : on le réarme.
+  return C.bgSel + body.split(C.rst).join(C.rst + C.bgSel) + pad + C.rst;
+}
+
+function draw() {
+  const width = process.stdout.columns || 80;
+  const height = process.stdout.rows || 24;
+  const viewH = Math.max(1, height - 3);
+
+  // garder la sélection visible
+  if (items.length) {
+    const r = items[sel];
+    if (r < off) off = r;
+    if (r >= off + viewH) off = r - viewH + 1;
+  }
+  off = Math.max(0, Math.min(off, Math.max(0, rows.length - viewH)));
+
+  let total = 0, done = 0;
+  for (const s of doc.sections) for (const i of s.items) { total++; if (i.mark === 'done') done++; }
+  const pct = total ? Math.round((done / total) * 100) : 0;
+
+  const head = `${C.bold}${doc.title || path.basename(file)}${C.rst} ${C.gry}·${C.rst} ` +
+    `${C.grn}${done}${C.rst}/${total} ${C.gry}(${pct}%)${C.rst}  ${C.red}${total - done} ouverts${C.rst}` +
+    (showDone ? `  ${C.gry}[faits affichés]${C.rst}` : '');
+
+  const out = [E + 'H', trunc(head, width) + E + 'K', C.gry + '─'.repeat(width) + C.rst + E + 'K'];
+
+  for (let i = 0; i < viewH; i++) {
+    const row = rows[off + i];
+    let line = '';
+    if (!row) line = '';
+    else if (row.type === 'sec') {
+      line = `${C.bold}${trunc(row.sec.title, width - 14)}${C.rst} ${C.gry}(${row.done}/${row.total})${C.rst}`;
+    } else if (row.type === 'item') {
+      line = renderItem(row.it, width, items[sel] === off + i);
+    } else if (row.type === 'desc') {
+      line = C.gry + '     ' + trunc(row.text, width - 6) + C.rst;
+    }
+    out.push(line + E + 'K');
+  }
+
+  const more = rows.length > off + viewH ? `${C.gry}  ↓ ${rows.length - off - viewH}${C.rst}` : '';
+  out.push(`${C.gry}↑↓ naviguer · ⏎/clic déplier · e tout · a faits · q quitter${C.rst}${more}`);
+
+  process.stdout.write(out.join('\n') + E + 'J');
+}
+
+// ── Mode --once : sortie brute, pipeable ────────────────────────────────
+if (once) {
+  const lines = [];
+  for (const sec of doc.sections) {
+    const vis = sec.items.filter((i) => showDone || i.mark !== 'done');
+    if (!vis.length) continue;
+    const d = sec.items.filter((i) => i.mark === 'done').length;
+    lines.push(`\n## ${sec.title} (${d}/${sec.items.length})`);
+    for (const it of vis) {
+      const g = MARK[it.mark].glyph;
+      const meta = (it.prio ? ` !${it.prio}` : '') + it.tags.map((t) => ` @${t}`).join('');
+      lines.push(`  ${g} ${it.id ? it.id + ' ' : ''}${it.label}${meta}`);
+      for (const dsc of it.desc) lines.push(`      ${dsc}`);
+    }
+  }
+  console.log(`${doc.title || path.basename(file)} — ${shortPath}`);
+  console.log(lines.join('\n'));
+  process.exit(0);
+}
+
+// ── TUI ─────────────────────────────────────────────────────────────────
+if (!process.stdin.isTTY || !process.stdout.isTTY) {
+  console.error('watchdodo a besoin d’un terminal interactif (sinon : --once).');
+  process.exit(1);
+}
+
+function enter() {
+  process.stdout.write(E + '?1049h' + E + '?25l' + E + '?1000h' + E + '?1006h');
+}
+function leave() {
+  process.stdout.write(E + '?1006l' + E + '?1000l' + E + '?25h' + E + '?1049l');
+  try { process.stdin.setRawMode(false); } catch {}
+}
+function quit(code = 0) { leave(); process.exit(code); }
+
+enter();
+process.stdin.setRawMode(true);
+process.stdin.resume();
+process.stdin.setEncoding('utf8');
+
+process.on('exit', leave);
+process.on('SIGINT', () => quit(0));
+process.on('SIGTERM', () => quit(0));
+process.stdout.on('resize', draw);
+
+// Rechargement : polling du mtime, insensible aux écritures atomiques
+// (rename-replace) des éditeurs, contrairement à fs.watch.
+fs.watchFile(file, { interval: 200 }, (curr, prev) => {
+  if (curr.mtimeMs !== prev.mtimeMs) { reload(); draw(); }
+});
+
+function move(delta) {
+  if (!items.length) return;
+  sel = Math.max(0, Math.min(items.length - 1, sel + delta));
+}
+function toggle() {
+  if (!items.length) return;
+  const it = rows[items[sel]].it;
+  if (!it.desc.length) return;
+  const k = keyOf(it);
+  if (expanded.has(k)) expanded.delete(k); else expanded.add(k);
+  buildRows();
+}
+function nextSection(dir) {
+  if (!items.length) return;
+  const curRow = items[sel];
+  if (dir > 0) {
+    for (let i = sel + 1; i < items.length; i++) {
+      if (rows.slice(curRow, items[i]).some((r) => r.type === 'sec')) { sel = i; return; }
+    }
+    sel = items.length - 1;
+  } else {
+    for (let i = sel - 1; i >= 0; i--) {
+      if (rows.slice(items[i], curRow).some((r) => r.type === 'sec')) { sel = i; return; }
+    }
+    sel = 0;
+  }
+}
+
+// Clic : la ligne écran → la ligne de contenu → l'item (ou son parent si on
+// a cliqué sur une ligne de description).
+function clickRow(y) {
+  const contentRow = off + (y - 3);
+  if (contentRow < 0 || contentRow >= rows.length) return;
+  let r = contentRow;
+  while (r >= 0 && rows[r].type === 'desc') r--;
+  if (r < 0 || rows[r].type !== 'item') return;
+  const i = items.indexOf(r);
+  if (i < 0) return;
+  sel = i;
+  toggle();
+}
+
+let buf = '';
+process.stdin.on('data', (chunk) => {
+  buf += chunk;
+  let guard = 0;
+  while (buf.length && guard++ < 64) {
+    // Souris SGR : ESC [ < btn ; x ; y (M|m)
+    const mouse = buf.match(/^\x1b\[<(\d+);(\d+);(\d+)([Mm])/);
+    if (mouse) {
+      buf = buf.slice(mouse[0].length);
+      const btn = +mouse[1], y = +mouse[3], press = mouse[4] === 'M';
+      if (btn === 64) { off = Math.max(0, off - 3); }
+      else if (btn === 65) { off = Math.min(Math.max(0, rows.length - 1), off + 3); }
+      else if (press && (btn & 3) === 0) { clickRow(y); }
+      draw();
+      continue;
+    }
+    if (/^\x1b\[<\d*;?\d*;?\d*$/.test(buf) || buf === '\x1b' || buf === '\x1b[') break; // séquence partielle
+
+    const arrow = buf.match(/^\x1b\[([ABCDHF])/);
+    if (arrow) {
+      buf = buf.slice(arrow[0].length);
+      const k = arrow[1];
+      if (k === 'A') move(-1);
+      else if (k === 'B') move(1);
+      else if (k === 'C') { const it = items.length && rows[items[sel]].it; if (it && it.desc.length && !expanded.has(keyOf(it))) toggle(); }
+      else if (k === 'D') { const it = items.length && rows[items[sel]].it; if (it && expanded.has(keyOf(it))) toggle(); }
+      else if (k === 'H') sel = 0;
+      else if (k === 'F') sel = items.length - 1;
+      draw();
+      continue;
+    }
+    // Page haut/bas
+    const pg = buf.match(/^\x1b\[([56])~/);
+    if (pg) { buf = buf.slice(pg[0].length); move(pg[1] === '5' ? -10 : 10); draw(); continue; }
+
+    const ch = buf[0];
+    buf = buf.slice(1);
+    if (ch === 'q' || ch === '\x03') quit(0);
+    else if (ch === 'j') move(1);
+    else if (ch === 'k') move(-1);
+    else if (ch === '\r' || ch === '\n') toggle();
+    else if (ch === '\t') nextSection(1);
+    else if (ch === 'g') sel = 0;
+    else if (ch === 'G') sel = items.length - 1;
+    else if (ch === 'a') { showDone = !showDone; buildRows(); }
+    else if (ch === 'e') { for (const s of doc.sections) for (const i of s.items) if (i.desc.length) expanded.add(keyOf(i)); buildRows(); }
+    else if (ch === 'c') { expanded.clear(); buildRows(); }
+    else if (ch === 'r') reload();
+    else continue;
+    draw();
+  }
+});
+
+buildRows();
+draw();

@@ -1,0 +1,32 @@
+{
+  "name": "watchtodo",
+  "version": "1.0.0",
+  "description": "Une TUI pour suivre un TODO.md sans quitter le terminal — clavier, souris, rechargement à chaud, zéro dépendance.",
+  "bin": {
+    "watchdodo": "./bin/watchdodo"
+  },
+  "files": [
+    "bin"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/XTalandier/watchtodo.git"
+  },
+  "bugs": {
+    "url": "https://github.com/XTalandier/watchtodo/issues"
+  },
+  "homepage": "https://github.com/XTalandier/watchtodo#readme",
+  "keywords": [
+    "todo",
+    "tui",
+    "terminal",
+    "cli",
+    "markdown",
+    "watch"
+  ],
+  "author": "Xavier Talandier",
+  "license": "MIT"
+}
