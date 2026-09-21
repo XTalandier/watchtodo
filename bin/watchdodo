@@ -5,7 +5,7 @@
  *
  *   watchdodo                 le TODO.md du repo courant (racine git)
  *   watchdodo fichier.md      un fichier précis
- *   watchdodo -a              affiche aussi les items faits
+ *   watchdodo -o              n'affiche que les items ouverts
  *   watchdodo --once          imprime tout et sort (pipeable, pas de TUI)
  *   watchdodo --init          crée un TODO.md d'exemple
  *
@@ -151,9 +151,11 @@ Affichage : \`watchdodo\`
 
 // ── CLI ─────────────────────────────────────────────────────────────────
 const argv = process.argv.slice(2);
-let showDone = false, once = false, init = false, file = null;
+// Les items faits restent visibles par défaut : masquer ce qui est terminé
+// prive l'outil de la moitié de son intérêt, voir sa progression.
+let showDone = true, once = false, init = false, file = null;
 for (const a of argv) {
-  if (a === '-a' || a === '--all') showDone = true;
+  if (a === '-o' || a === '--open') showDone = false;
   else if (a === '-1' || a === '--once') once = true;
   else if (a === '--init') init = true;
   else if (a === '-h' || a === '--help') {
@@ -267,7 +269,7 @@ function draw() {
 
   const head = `${C.bold}${doc.title || path.basename(file)}${C.rst} ${C.gry}·${C.rst} ` +
     `${C.grn}${done}${C.rst}/${total} ${C.gry}(${pct}%)${C.rst}  ${C.red}${total - done} ouverts${C.rst}` +
-    (showDone ? `  ${C.gry}[faits affichés]${C.rst}` : '');
+    (showDone ? '' : `  ${C.gry}[faits masqués]${C.rst}`);
 
   const out = [E + 'H', trunc(head, width) + E + 'K', C.gry + '─'.repeat(width) + C.rst + E + 'K'];
 
@@ -286,7 +288,8 @@ function draw() {
   }
 
   const more = rows.length > off + viewH ? `${C.gry}  ↓ ${rows.length - off - viewH}${C.rst}` : '';
-  out.push(`${C.gry}↑↓ naviguer · ⏎/clic déplier · e tout · a faits · q quitter${C.rst}${more}`);
+  const aHint = showDone ? 'a masquer faits' : 'a voir faits';
+  out.push(`${C.gry}↑↓ naviguer · ⏎/clic déplier · e tout · ${aHint} · q quitter${C.rst}${more}`);
 
   process.stdout.write(out.join('\n') + E + 'J');
 }

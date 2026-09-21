@@ -9,13 +9,14 @@ réel du chantier. Le fichier reste un markdown parfaitement lisible — sur Git
 dans un éditeur, ou à l'œil nu.
 
 ```
-Kidyscope — TODO · 1/31 (3%)  30 ouverts
+Kidyscope — TODO · 3/31 (10%)  28 ouverts
 ─────────────────────────────────────────────────────────────────────────────
-🔴 Sécurité (0/9)
- ▸ ○ SEC-1 IDOR capsules : findAll et findOne au niveau tribu !haute @api
+🔴 Sécurité (2/9)
+ ▸ ✔ SEC-1 IDOR capsules : scope enfant sur findAll/findOne + create @api
  ▸ ○ SEC-2 IDOR milestones : findOne et verifyChildAccess !haute @api
- ▸ ○ SEC-3 IDOR comments : verifyAccess au niveau tribu !haute @api
- ▸ ○ SEC-4 IDOR reactions, à factoriser avec comments !haute @api
+ ▸ ✔ SEC-3 Commentaires au niveau tribu : assumé, décision produit @api
+ ▸ ○ SEC-4 Factoriser les deux verifyAccess identiques !basse @api
+ ▸ ◐ SEC-6 Test API du scope enfant !haute @test
 
 🔴 Produit (0/4)
  ▸ ○ PROD-1 Sceller les capsules côté serveur !haute @api
@@ -26,9 +27,8 @@ Kidyscope — TODO · 1/31 (3%)  30 ouverts
  ▸ ○ DET-1 media-proxy sans backpressure !moyenne @api
  ▾ ○ DET-2 fanOutToFamily séquentiel !basse @api
      `notifications.service.ts:84` — await dans une boucle.
- ▸ ○ DET-3 fanOutToFamily ignore le scope enfant !moyenne @api
 
-↑↓ naviguer · ⏎/clic déplier · e tout · a faits · q quitter
+↑↓ naviguer · ⏎/clic déplier · e tout · a masquer faits · q quitter
 ```
 
 > La commande s'appelle `watchdodo`, le dépôt `watchtodo`. C'est volontaire :
@@ -54,7 +54,7 @@ Remplacez `~/.local/bin` par n'importe quel répertoire de votre `PATH`.
 ```bash
 watchdodo                 # le TODO.md de la racine git courante
 watchdodo fichier.md      # un fichier précis
-watchdodo -a              # affiche aussi les items faits
+watchdodo -o              # n'affiche que les items ouverts
 watchdodo --once          # sortie texte, sans TUI — pipeable
 watchdodo --init          # crée un TODO.md d'exemple
 ```
@@ -69,7 +69,7 @@ watchdodo --init          # crée un TODO.md d'exemple
 | molette | défiler |
 | `Tab` | section suivante |
 | `e` / `c` | tout déplier / tout replier |
-| `a` | afficher aussi les items faits |
+| `a` | masquer / réafficher les items faits |
 | `g` / `G` | premier / dernier item |
 | `q` | quitter |
 
