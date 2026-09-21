@@ -1,12 +1,19 @@
 # watchtodo
 
-**Une TUI pour suivre un `TODO.md` sans jamais quitter le terminal.**
-Navigation clavier et souris, dépliage des descriptions, rechargement à chaud.
-Zéro dépendance.
+**Deux TUI pour le terminal, à garder dans un panneau ouvert à côté de l'éditeur.**
+Navigation clavier et souris, rafraîchissement à chaud, zéro dépendance.
 
-L'idée : garder un panneau ouvert en permanence à côté de son éditeur, avec l'état
-réel du chantier. Le fichier reste un markdown parfaitement lisible — sur GitHub,
-dans un éditeur, ou à l'œil nu.
+| Commande | À quoi ça sert |
+|---|---|
+| [`watchdodo`](#watchdodo--suivre-un-todomd) | suivre un `TODO.md` |
+| [`claudeagent`](#claudeagent--voir-les-agents-claude-code) | voir les agents Claude Code qui tournent en tâche de fond |
+
+---
+
+## `watchdodo` — suivre un `TODO.md`
+
+Le fichier reste un markdown parfaitement lisible — sur GitHub, dans un éditeur,
+ou à l'œil nu.
 
 ```
 Kidyscope — TODO · 3/31 (10%)  28 ouverts
@@ -42,7 +49,8 @@ Node ≥ 18, rien d'autre. Pas de `npm install`, pas de `node_modules`.
 
 ```bash
 git clone git@github.com:XTalandier/watchtodo.git ~/projects/watchtodo
-ln -s ~/projects/watchtodo/bin/watchdodo ~/.local/bin/watchdodo
+ln -s ~/projects/watchtodo/bin/watchdodo   ~/.local/bin/watchdodo
+ln -s ~/projects/watchtodo/bin/claudeagent ~/.local/bin/claudeagent
 ```
 
 Remplacez `~/.local/bin` par n'importe quel répertoire de votre `PATH`.
@@ -172,6 +180,68 @@ ouvert, et la sélection reste sur le même item.
 **Largeur des colonnes.** Les emojis comptent pour deux colonnes. Sans cela, les
 troncatures et le remplissage de la ligne sélectionnée seraient décalés dès qu'un
 titre de catégorie contient un emoji.
+
+---
+
+## `claudeagent` — voir les agents Claude Code
+
+Claude Code peut lancer des sous-agents en tâche de fond. Une fois lancés, ils
+travaillent sans rien afficher : on ne sait ni combien tournent, ni ce qu'ils
+font, ni depuis combien de temps.
+
+```
+AGENTS · 1 actif · 11 au total
+──────────────────────────────────────────────────────────────────
+ ● ac6356755   9m32  MAJ tests rotation v2
+ ✔ ac33c0d67   9m29  Tests rotation refresh token
+ ✔ a0d595300   4m29  Tests fanOutToFamily scope
+ ✔ ae20a3b56  15m45  Front signature média à la demande
+──────────────────────────────────────────────────────────────────
+93 étapes · -Users-xavier-projects-kidyscope
+· réflexion
+⚙ Bash · npm test
+↳ résultat
+⚙ Edit · apps/api/src/auth/auth.service.spec.ts
+
+↑↓ choisir · clic · PgUp/PgDn détail · r recharger · q quitter
+```
+
+```bash
+claudeagent           # les agents du projet courant
+claudeagent --all     # tous projets confondus
+claudeagent --once    # liste unique, sans TUI — pipeable
+```
+
+Choisir un agent avec les flèches ou au clic affiche son activité récente
+dessous : appels d'outils, réflexions, résultats.
+
+### Où il prend ses données
+
+Claude Code écrit un transcript JSONL par sous-agent :
+
+```
+~/.claude/projects/<projet>/<session>/subagents/agent-<id>.jsonl
+```
+
+Le nom du dossier projet encode le répertoire de travail (`/` → `-`), donc la
+commande remonte l'arborescence : la lancer depuis un sous-dossier du dépôt
+fonctionne.
+
+Deux détails d'implémentation valent d'être connus :
+
+**Le titre ne vient pas du transcript de l'agent.** Sa première ligne est le
+prompt, qui commence par du passe-partout et ne fait pas un libellé. Le vrai
+titre est la `description` passée à l'outil, qui vit dans le transcript de la
+session *parente* — le bloc `tool_use` porte la description, le `tool_result`
+correspondant porte l'`agentId`. On recoud les deux.
+
+**La lecture est incrémentale.** Ce transcript parent pèse plusieurs mégaoctets
+et grossit en continu ; les transcripts d'agents aussi. On ne lit donc que la
+tête (la mission), la queue (l'activité), et pour le parent uniquement les
+octets ajoutés depuis le dernier passage.
+
+**Actif ou terminé** se déduit de la fraîcheur du fichier : un agent au travail
+écrit à chaque étape. C'est une heuristique, pas un statut officiel.
 
 ---
 

@@ -16,6 +16,17 @@ Affichage : `watchdodo`
 
 - [ ] **UI-4** Repli des catégories entières `@tui` `!basse`
 
+## 🤖 claudeagent
+
+- [x] **AG-1** TUI de suivi des agents Claude Code `@tui`
+  Liste live, navigation clavier et souris, détail de l'activité.
+
+- [ ] **AG-2** Distinguer « terminé » de « bloqué » `@tui` `!moyenne`
+  Aujourd'hui c'est la fraîcheur du fichier qui décide — un agent lent paraît fini.
+
+- [ ] **AG-3** Ouvrir le transcript complet depuis la TUI `@tui` `!basse`
+  Une touche pour envoyer le JSONL dans le pager.
+
 ## 🔌 Compatibilité
 
 - [ ] **CMP-1** Valider le rendu hors tmux `@compat` `!moyenne`
