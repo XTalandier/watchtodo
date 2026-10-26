@@ -7,6 +7,12 @@
  *   watchdodo fichier.md      un fichier précis
  *   watchdodo -o              n'affiche que les items ouverts
  *   watchdodo --once          imprime tout et sort (pipeable, pas de TUI)
+ *   watchdodo --open          n'affiche que ce qui RESTE à faire
+ *   watchdodo --all           affiche tout, même si on avait masqué
+ *
+ * La touche `a` bascule entre les deux en cours de route, et le choix est
+ * RETENU pour ce fichier — sur une longue liste, le refaire à chaque
+ * ouverture est le genre de geste qu'on finit par reprocher à l'outil.
  *   watchdodo --init          crée un TODO.md d'exemple
  *
  * Lecture seule : l'outil n'écrit JAMAIS dans le fichier. Il recharge
@@ -149,13 +155,53 @@ Affichage : \`watchdodo\`
 - [ ] **B-1** Un autre item \`@perso\`
 `;
 
+// ── Préférences retenues ────────────────────────────────────────────────
+//
+// POURQUOI LES ÉCRIRE SUR LE DISQUE. Masquer les faits existe depuis
+// toujours — touche `a`, ou `-o` au lancement. Sur une liste de 173
+// items dont 150 cochés, on le refait à CHAQUE ouverture, et c'est
+// exactement le genre de geste qu'on finit par reprocher à l'outil.
+//
+// Par FICHIER, parce que l'habitude n'est pas la même partout : on suit
+// les restes sur un projet en cours, et la progression entière sur un
+// projet qu'on vient de finir.
+//
+// Rien de tout ceci ne doit pouvoir faire échouer l'affichage : un HOME
+// en lecture seule, un disque plein, un JSON abîmé à la main — on vit
+// sans mémoire plutôt que de refuser de démarrer.
+const PREFS = path.join(
+  process.env.XDG_CONFIG_HOME || path.join(process.env.HOME || '.', '.config'),
+  'watchdodo',
+  'prefs.json',
+);
+
+function lirePrefs() {
+  try { return JSON.parse(fs.readFileSync(PREFS, 'utf8')); } catch { return {}; }
+}
+
+function ecrirePref(cle, valeur) {
+  try {
+    const prefs = lirePrefs();
+    prefs[cle] = { ...(prefs[cle] || {}), ...valeur };
+    fs.mkdirSync(path.dirname(PREFS), { recursive: true });
+    fs.writeFileSync(PREFS, JSON.stringify(prefs, null, 2));
+  } catch {
+    // Tant pis pour la mémoire : l'écran, lui, continue.
+  }
+}
+
 // ── CLI ─────────────────────────────────────────────────────────────────
 const argv = process.argv.slice(2);
 // Les items faits restent visibles par défaut : masquer ce qui est terminé
 // prive l'outil de la moitié de son intérêt, voir sa progression.
 let showDone = true, once = false, init = false, file = null;
+// Vrai si la ligne de commande a tranché : elle l'emporte alors sur ce
+// qu'on avait retenu. Demander `-o` puis voir la préférence d'hier
+// gagner serait incompréhensible.
+let choixExplicite = false;
 for (const a of argv) {
-  if (a === '-o' || a === '--open') showDone = false;
+  if (a === '-o' || a === '--open') { showDone = false; choixExplicite = true; }
+  else if (a === '-A' || a === '--all') { showDone = true; choixExplicite = true; }
   else if (a === '-1' || a === '--once') once = true;
   else if (a === '--init') init = true;
   else if (a === '-h' || a === '--help') {
@@ -171,6 +217,15 @@ for (const a of argv) {
 
 if (!file) file = path.join(gitRoot() || process.cwd(), 'TODO.md');
 file = path.resolve(file);
+
+// La mémoire s'applique APRÈS la résolution du chemin — c'est lui la clé —
+// et seulement si la ligne de commande n'a pas tranché.
+if (!choixExplicite) {
+  const retenu = lirePrefs()[file];
+  if (retenu && typeof retenu.faitsMasques === 'boolean') {
+    showDone = !retenu.faitsMasques;
+  }
+}
 
 if (init && !fs.existsSync(file)) {
   fs.mkdirSync(path.dirname(file), { recursive: true });
@@ -192,6 +247,20 @@ let rows = [];          // lignes affichables
 let items = [];         // index des lignes de type 'item'
 let sel = 0;            // index dans `items`
 let off = 0;            // offset de scroll
+/**
+ * La vue suit-elle la sélection ?
+ *
+ * ELLE LE FAISAIT TOUJOURS, et c'est ce qui rendait la molette inutile :
+ * chaque `draw()` ramenait `off` sur la ligne sélectionnée, donc un cran
+ * de molette était annulé par le redessin qui le suivait. Mesuré sur une
+ * liste de 173 items — cinq crans déplaçaient la vue d'UNE ligne, puis
+ * elle revenait.
+ *
+ * Déplacer la sélection rallume le suivi ; faire défiler l'éteint. C'est
+ * la distinction que l'écran ne faisait pas : « je choisis » et « je
+ * regarde ailleurs » ne demandent pas la même chose.
+ */
+let suitSelection = true;
 const expanded = new Set();   // clés d'items dépliés, survivent au reload
 
 const keyOf = (it) => it.id || it.label;
@@ -255,8 +324,8 @@ function draw() {
   const height = process.stdout.rows || 24;
   const viewH = Math.max(1, height - 3);
 
-  // garder la sélection visible
-  if (items.length) {
+  // Garder la sélection visible — SEULEMENT quand c'est elle qui mène.
+  if (suitSelection && items.length) {
     const r = items[sel];
     if (r < off) off = r;
     if (r >= off + viewH) off = r - viewH + 1;
@@ -348,9 +417,26 @@ fs.watchFile(file, { interval: 200 }, (curr, prev) => {
 function move(delta) {
   if (!items.length) return;
   sel = Math.max(0, Math.min(items.length - 1, sel + delta));
+  suitSelection = true;
+}
+
+/**
+ * Fait défiler la vue sans toucher à la sélection.
+ *
+ * Le plafond est laissé à `draw`, qui l'applique déjà — il doit le faire
+ * de toute façon, ne serait-ce qu'au redimensionnement de la fenêtre.
+ * J'en avais écrit un second ici, par prudence : la mutation qui le
+ * supprimait ne faisait tomber aucun cas, donc il ne décrivait rien.
+ */
+function defiler(delta) {
+  off = Math.max(0, off + delta);
+  suitSelection = false;
 }
 function toggle() {
   if (!items.length) return;
+  // On vient d'agir SUR la sélection : la montrer, sinon on déplie une
+  // ligne qu'on ne voit pas et l'écran a l'air de ne rien faire.
+  suitSelection = true;
   const it = rows[items[sel]].it;
   if (!it.desc.length) return;
   const k = keyOf(it);
@@ -359,6 +445,7 @@ function toggle() {
 }
 function nextSection(dir) {
   if (!items.length) return;
+  suitSelection = true;
   const curRow = items[sel];
   if (dir > 0) {
     for (let i = sel + 1; i < items.length; i++) {
@@ -384,6 +471,7 @@ function clickRow(y) {
   const i = items.indexOf(r);
   if (i < 0) return;
   sel = i;
+  suitSelection = true;
   toggle();
 }
 
@@ -397,8 +485,8 @@ process.stdin.on('data', (chunk) => {
     if (mouse) {
       buf = buf.slice(mouse[0].length);
       const btn = +mouse[1], y = +mouse[3], press = mouse[4] === 'M';
-      if (btn === 64) { off = Math.max(0, off - 3); }
-      else if (btn === 65) { off = Math.min(Math.max(0, rows.length - 1), off + 3); }
+      if (btn === 64) { defiler(-3); }
+      else if (btn === 65) { defiler(3); }
       else if (press && (btn & 3) === 0) { clickRow(y); }
       draw();
       continue;
@@ -413,14 +501,23 @@ process.stdin.on('data', (chunk) => {
       else if (k === 'B') move(1);
       else if (k === 'C') { const it = items.length && rows[items[sel]].it; if (it && it.desc.length && !expanded.has(keyOf(it))) toggle(); }
       else if (k === 'D') { const it = items.length && rows[items[sel]].it; if (it && expanded.has(keyOf(it))) toggle(); }
-      else if (k === 'H') sel = 0;
-      else if (k === 'F') sel = items.length - 1;
+      else if (k === 'H') { sel = 0; suitSelection = true; }
+      else if (k === 'F') { sel = items.length - 1; suitSelection = true; }
       draw();
       continue;
     }
     // Page haut/bas
+    // Page haut/bas : une page, c'est la HAUTEUR DE LA VUE. C'était dix
+    // items en dur, donc un saut qui ne correspondait à rien de visible —
+    // trop court sur un grand terminal, trop long sur un petit.
     const pg = buf.match(/^\x1b\[([56])~/);
-    if (pg) { buf = buf.slice(pg[0].length); move(pg[1] === '5' ? -10 : 10); draw(); continue; }
+    if (pg) {
+      buf = buf.slice(pg[0].length);
+      const page = Math.max(1, (process.stdout.rows || 24) - 4);
+      defiler(pg[1] === '5' ? -page : page);
+      draw();
+      continue;
+    }
 
     const ch = buf[0];
     buf = buf.slice(1);
@@ -429,11 +526,19 @@ process.stdin.on('data', (chunk) => {
     else if (ch === 'k') move(-1);
     else if (ch === '\r' || ch === '\n') toggle();
     else if (ch === '\t') nextSection(1);
-    else if (ch === 'g') sel = 0;
-    else if (ch === 'G') sel = items.length - 1;
-    else if (ch === 'a') { showDone = !showDone; buildRows(); }
-    else if (ch === 'e') { for (const s of doc.sections) for (const i of s.items) if (i.desc.length) expanded.add(keyOf(i)); buildRows(); }
-    else if (ch === 'c') { expanded.clear(); buildRows(); }
+    else if (ch === 'g') { sel = 0; suitSelection = true; }
+    else if (ch === 'G') { sel = items.length - 1; suitSelection = true; }
+    // Ces trois-là REBÂTISSENT la liste : l'offset d'avant ne désigne
+    // plus la même chose. On repart de la sélection, seul repère qui
+    // survive à la reconstruction.
+    else if (ch === 'a') {
+      showDone = !showDone;
+      ecrirePref(file, { faitsMasques: !showDone });
+      buildRows();
+      suitSelection = true;
+    }
+    else if (ch === 'e') { for (const s of doc.sections) for (const i of s.items) if (i.desc.length) expanded.add(keyOf(i)); buildRows(); suitSelection = true; }
+    else if (ch === 'c') { expanded.clear(); buildRows(); suitSelection = true; }
     else if (ch === 'r') reload();
     else continue;
     draw();

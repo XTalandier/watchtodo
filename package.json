@@ -31,5 +31,8 @@
     "agents"
   ],
   "author": "Xavier Talandier",
-  "license": "MIT"
+  "license": "MIT",
+  "scripts": {
+    "test": "python3 test/defilement.py"
+  }
 }

@@ -63,6 +63,7 @@ Remplacez `~/.local/bin` par n'importe quel répertoire de votre `PATH`.
 watchdodo                 # le TODO.md de la racine git courante
 watchdodo fichier.md      # un fichier précis
 watchdodo -o              # n'affiche que les items ouverts
+watchdodo --all           # affiche tout, même si on avait masqué
 watchdodo --once          # sortie texte, sans TUI — pipeable
 watchdodo --init          # crée un TODO.md d'exemple
 ```
@@ -77,13 +78,19 @@ watchdodo --init          # crée un TODO.md d'exemple
 | molette | défiler |
 | `Tab` | section suivante |
 | `e` / `c` | tout déplier / tout replier |
-| `a` | masquer / réafficher les items faits |
+| `a` | masquer / réafficher les items faits — **le choix est retenu** |
 | `g` / `G` | premier / dernier item |
 | `q` | quitter |
 
 `watchtodo` est en **lecture seule**. Il n'écrit jamais dans votre fichier : vous
 cochez dans votre éditeur, l'affichage se met à jour tout seul. Aucun risque de
 conflit d'écriture si un autre outil modifie le fichier en même temps.
+
+La seule chose qu'il écrit est votre préférence d'affichage, dans
+`~/.config/watchdodo/prefs.json`, **par fichier** — on suit les restes sur un
+projet en cours et la progression entière sur un projet qu'on vient de finir.
+Un `-o` ou un `--all` explicite passe devant. Si ce fichier est illisible ou
+l'écriture refusée, l'outil s'en passe sans rien dire.
 
 ---
 
@@ -145,6 +152,21 @@ Quand je demande une todo ou un plan de travail persistant, écris-le dans
 
 L'agent lit l'état courant avec `watchdodo --once`, qui produit une sortie texte
 compacte sans séquences d'échappement.
+
+---
+
+## Tests
+
+```bash
+npm test
+```
+
+Ils lancent le vrai programme dans un **pseudo-terminal** de taille imposée et
+lui envoient de vraies séquences de souris et de clavier. Sans terminal, le
+programme ne passe pas en mode brut et n'arme pas le rapport de souris : la
+molette n'existerait pas, et le défaut qu'ils protègent ne se manifesterait
+pas. Les assertions portent sur ce que l'écran AFFICHE — le compteur de lignes
+restantes, les coches visibles — jamais sur une variable interne.
 
 ---
 
